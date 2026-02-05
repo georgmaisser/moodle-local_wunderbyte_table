@@ -1,3 +1,15 @@
+## Version 3.0.9 (2026020600)
+* Security: Implement HMAC-based cache validation to prevent object deserialization attacks
+* Security: Add user ID and session key verification for cached table objects
+* Security: Implement class whitelist validation for cached objects
+* Security: Add cryptographic signature verification using hash_hmac
+* Security: Add metadata storage with timestamp and signature for cache entries
+* Security: Add comprehensive input validation for cache hash format
+* Security: Add new admin setting for configurable cache secret key
+* Improvement: Add callback mechanism for plugins to register allowed table subclasses
+* Improvement: Add detailed security error messages in English and German
+* Documentation: Add security-related exception strings
+
 ## Version 3.0.8 (2026020501)
 * Revert "Hotfix: Hierarchical filter remains base class". Use new customfieldfilter class as parent.
 
