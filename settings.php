@@ -87,4 +87,24 @@ if ($hassiteconfig) {
             1
         )
     );
+
+    // Security: Enable class whitelist validation.
+    $settings->add(
+        new admin_setting_configcheckbox(
+            'local_wunderbyte_table/enableclasswhitelist',
+            get_string('enableclasswhitelist', 'local_wunderbyte_table'),
+            get_string('enableclasswhitelist_desc', 'local_wunderbyte_table'),
+            1
+        )
+    );
+
+    // Security: Secret key for HMAC-based cache validation.
+    $settings->add(
+        new admin_setting_configpasswordunmask(
+            'local_wunderbyte_table/cache_secret',
+            get_string('cachesecret', 'local_wunderbyte_table'),
+            get_string('cachesecret_desc', 'local_wunderbyte_table'),
+            ''
+        )
+    );
 }

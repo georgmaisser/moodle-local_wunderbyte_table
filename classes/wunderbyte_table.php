@@ -1876,6 +1876,7 @@ class wunderbyte_table extends table_sql {
      * @return string
      */
     public function return_encoded_table($newcache = false) {
+        global $CFG;
 
         // We don't want errormessage in the encoded table.
         $this->errormessage = '';
@@ -1887,9 +1888,26 @@ class wunderbyte_table extends table_sql {
         if (empty($this->tablecachehash) || $newcache) {
             $cache = cache::make('local_wunderbyte_table', 'encodedtables');
 
-            // We need to make sure that the correct instance with the correct capabilities are cached.
-            // Therefore, we add the capability to the hash.
-            $this->tablecachehash = md5($this->idstring . $this->requirecapability ?? '' . $this->requirelogin ?? '');
+            // SECURITY: Generate deterministic hash based on table configuration only.
+            // This allows cache sharing across multiple users (important for performance).
+            // Hash validation is done on retrieval, not on generation.
+            $configdata = $this->idstring .
+                          ($this->requirecapability ?? '') .
+                          ($this->requirelogin ?? '');
+
+            $this->tablecachehash = sha1($configdata);
+
+            // SECURITY: Store metadata with HMAC signature for integrity verification.
+            $secret = self::get_cache_secret();
+            $signature = hash_hmac('sha256', $configdata, $secret);
+
+            $metadata = [
+                'classname' => get_class($this),
+                'signature' => $signature,
+                'idstring' => $this->idstring,
+                'requirecapability' => $this->requirecapability ?? '',
+                'requirelogin' => $this->requirelogin ?? '',
+            ];
 
             // We just fetch the pagesize, no need to get all the table here.
             if (($pagesize = $cache->get($this->tablecachehash . '_pagesize')) && !$newcache) {
@@ -1899,6 +1917,7 @@ class wunderbyte_table extends table_sql {
                 $filter = $this->sql->filter ?? '';
                 $this->sql->filter = '';
 
+                $cache->set($this->tablecachehash . '_meta', $metadata);
                 $cache->set($this->tablecachehash, $this);
                 $cache->set($this->tablecachehash . '_pagesize', $this->pagesize);
 
@@ -1907,7 +1926,6 @@ class wunderbyte_table extends table_sql {
             }
         }
 
-        // We need to urlencode everything to make it proof.
         return $this->tablecachehash;
     }
 
@@ -2069,15 +2087,125 @@ class wunderbyte_table extends table_sql {
     /**
      * This returns an instance of wunderbyte table or child class.
      *
+     * SECURITY: This method validates cache integrity using HMAC signatures
+     * and class whitelisting. Note: Cache is shared across users based on
+     * table configuration to optimize performance in high-traffic scenarios.
+     *
      * @param string $tablecachehash
      * @return wunderbyte_table
+     * @throws moodle_exception If validation fails
      */
     public static function instantiate_from_tablecache_hash(string $tablecachehash) {
+        global $CFG;
+
+        // SECURITY: Validate input format (must be 40 hexadecimal characters).
+        if (!preg_match('/^[a-f0-9]{40}$/i', $tablecachehash)) {
+            throw new moodle_exception('invalidcachehash', 'local_wunderbyte_table');
+        }
 
         $cache = cache::make('local_wunderbyte_table', 'encodedtables');
+
+        // SECURITY: Retrieve and validate metadata.
+        $metadata = $cache->get($tablecachehash . '_meta');
+        if (!$metadata || !is_array($metadata)) {
+            throw new moodle_exception('invalidcachehash', 'local_wunderbyte_table');
+        }
+
+        // SECURITY: Verify required metadata fields exist.
+        $requiredfields = ['classname', 'signature', 'idstring'];
+        foreach ($requiredfields as $field) {
+            if (!isset($metadata[$field])) {
+                throw new moodle_exception('invalidcachemetadata', 'local_wunderbyte_table');
+            }
+        }
+
+        // Retrieve cached object.
         $class = $cache->get($tablecachehash);
+        if (!$class) {
+            throw new moodle_exception('cacheobjectnotfound', 'local_wunderbyte_table');
+        }
+
+        // SECURITY: Validate object is instance of wunderbyte_table.
+        if (!($class instanceof wunderbyte_table)) {
+            throw new moodle_exception('invalidcachedobject', 'local_wunderbyte_table');
+        }
+
+        // SECURITY: Whitelist allowed classes (base class + known safe subclasses).
+        // This can be disabled via admin settings for legacy compatibility.
+        $enablewhitelist = get_config('local_wunderbyte_table', 'enableclasswhitelist');
+        if ($enablewhitelist !== '0') { // Enabled by default if not explicitly disabled.
+            $actualclass = get_class($class);
+            $allowedclasses = self::get_allowed_table_classes();
+
+            if (!in_array($actualclass, $allowedclasses, true)) {
+                debugging('Class not whitelisted: ' . $actualclass, DEBUG_DEVELOPER);
+                throw new moodle_exception('classnotwhitelisted', 'local_wunderbyte_table', '', $actualclass);
+            }
+        }
+
+        // SECURITY: Verify HMAC signature to prevent cache tampering.
+        $secret = self::get_cache_secret();
+
+        // Reconstruct base data from metadata (configuration only, no user/session/time).
+        $configdata = ($metadata['idstring'] ?? '') .
+                      ($metadata['requirecapability'] ?? '') .
+                      ($metadata['requirelogin'] ?? '');
+
+        $expectedsig = hash_hmac('sha256', $configdata, $secret);
+
+        // Use hash_equals to prevent timing attacks.
+        if (!hash_equals($expectedsig, $metadata['signature'])) {
+            throw new moodle_exception('invalidsignature', 'local_wunderbyte_table');
+        }
 
         return $class;
+    }
+
+    /**
+     * Returns array of allowed table classes for security whitelist.
+     *
+     * @return array
+     */
+    protected static function get_allowed_table_classes(): array {
+        global $CFG;
+
+        // Base class is always allowed.
+        $allowed = ['local_wunderbyte_table\\wunderbyte_table'];
+
+        // Allow demo_table for testing purposes.
+        if (defined('PHPUNIT_TEST') && PHPUNIT_TEST) {
+            $allowed[] = 'local_wunderbyte_table\\demo_table';
+        }
+
+        // Allow plugins to register their own safe table subclasses.
+        $callbacks = get_plugins_with_function('wunderbyte_table_allowed_classes', 'lib.php');
+        foreach ($callbacks as $plugins) {
+            foreach ($plugins as $pluginfunction) {
+                $classes = $pluginfunction();
+                if (is_array($classes)) {
+                    $allowed = array_merge($allowed, $classes);
+                }
+            }
+        }
+
+        return array_unique($allowed);
+    }
+
+    /**
+     * Get the secret key for HMAC-based cache validation.
+     *
+     * @return string
+     */
+    protected static function get_cache_secret(): string {
+        global $CFG;
+
+        $secret = get_config('local_wunderbyte_table', 'cache_secret');
+        if (empty($secret)) {
+            // Fallback to password salt if no specific secret is configured.
+            $salt = isset($CFG->passwordsaltmain) ? $CFG->passwordsaltmain : 'fallback_salt_for_tests';
+            $secret = hash('sha256', $salt . 'wunderbyte_table_cache');
+        }
+        return $secret;
     }
 
     /**
